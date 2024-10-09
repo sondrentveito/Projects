@@ -1,0 +1,137 @@
+import os
+import pandas as pd
+import openpyxl
+from openpyxl.utils import get_column_letter
+
+# Define the directory where files are located
+input_directory = 'C:/Users/G703186/membership_split/mainfiles'
+
+# Function to find the most recent file based on modification time
+def find_latest_file(file_prefix):
+    all_files = os.listdir(input_directory)
+    # Filter for both .xls and .xlsx files
+    filtered_files = [f for f in all_files if f.startswith(file_prefix) and (f.endswith('.xls') or f.endswith('.xlsx'))]
+    if not filtered_files:
+        raise FileNotFoundError(f'No files found for prefix: {file_prefix}')
+    
+    # Get the most recent file based on modification time
+    latest_file = max([os.path.join(input_directory, f) for f in filtered_files], key=os.path.getmtime)
+    return latest_file
+
+# Function to calculate age from Birthdate
+def calculate_age(birthdate):
+    today = pd.Timestamp.today()
+    return today.year - birthdate.year - ((today.month, today.day) < (birthdate.month, birthdate.day))
+
+# Find the most recent versions of the files
+latest_membership_file = find_latest_file('medlemmer_invoice')
+latest_teamgroup_file = find_latest_file('medlemmer_teamgroup')
+
+print(f'Latest membership file: {latest_membership_file}')
+print(f'Latest TeamGroup file: {latest_teamgroup_file}')
+
+# Load the most recent files
+membership_df = pd.read_excel(latest_membership_file)
+teamgroup_df = pd.read_excel(latest_teamgroup_file)
+
+# Merge the two DataFrames on 'Memberno' from membership_df and 'MemberNumber' from teamgroup_df
+merged_df = pd.merge(membership_df, teamgroup_df, left_on='Memberno', right_on='MemberNumber', how='inner')
+
+# Add the payment_status column based on whether PaymentDate is null
+merged_df['payment_status'] = merged_df['PaymentDate'].apply(lambda x: 'Ubetalt' if pd.isnull(x) else 'Betalt')
+
+# Select the columns you want to keep for team-specific files (adjust column names as needed)
+columns_to_keep_team = ['Firstname', 'Lastname', 'Address_x', 'Zipcode', 'Birthdate', 'Birthyear', 'Gender_x', 'Mobile', 'Email', 'TeamGroup', 'PaymentDate', 'PaymentAmount', 'payment_status']
+filtered_df_team = merged_df[columns_to_keep_team]
+
+# Select the columns and apply additional transformations for the master file
+columns_to_keep_master = ['Firstname', 'Lastname', 'Address_x', 'Zipcode', 'Birthdate', 'Gender_x', 'Mobile', 'Email', 'TeamGroup', 'PaymentDate', 'PaymentAmount', 'payment_status']
+
+# Apply additional transformations only for the master file, such as calculating age from Birthdate
+filtered_df_master = merged_df[columns_to_keep_master]
+filtered_df_master['Age'] = filtered_df_master['Birthdate'].apply(lambda x: calculate_age(x) if pd.notnull(x) else None)
+
+# Modify 'TeamGroup' to use only the first part (before the comma)
+filtered_df_team['TeamGroup'] = filtered_df_team['TeamGroup'].apply(lambda x: x.split(',')[0].strip())
+filtered_df_master['TeamGroup'] = filtered_df_master['TeamGroup'].apply(lambda x: x.split(',')[0].strip())
+
+# Calculate UnpaidAmount for rows where PaymentDate and PaymentAmount are null
+def calculate_unpaid_amount(row, group):
+    if pd.isnull(row['PaymentDate']) and pd.isnull(row['PaymentAmount']):
+        return group['PaymentAmount'].max()
+    return None
+
+# Apply the calculation for each team group
+filtered_df_team['UnpaidAmount'] = filtered_df_team.groupby('TeamGroup').apply(
+    lambda group: group.apply(lambda row: calculate_unpaid_amount(row, group), axis=1)
+).reset_index(drop=True)
+
+# Initialize an empty DataFrame for the master file
+master_df = pd.DataFrame()
+
+# Group by 'TeamGroup' and sort by 'Medlemsskap' in descending order for team-specific files
+grouped = filtered_df_team.groupby('TeamGroup')
+
+# Save each group into separate Excel files after sorting by 'Medlemsskap'
+for teamgroup, group_data in grouped:
+    sorted_group = group_data.sort_values(by='Medlemsskap', ascending=False)
+    
+    # Add to the master DataFrame
+    master_df = pd.concat([master_df, sorted_group])
+
+    # Create a safe filename by replacing spaces and special characters
+    safe_teamgroup = teamgroup.replace(" ", "_").replace("/", "_").replace("\\", "_")
+    
+    # Define the file name for individual team group
+    file_name = f"teamgroup_{safe_teamgroup}.xlsx"
+    
+    # Save the sorted group to a new Excel file
+    sorted_group.to_excel(file_name, index=False)
+    
+    # Adjust column widths using openpyxl
+    wb = openpyxl.load_workbook(file_name)
+    ws = wb.active
+    
+    for col in ws.columns:
+        max_length = 0
+        column = col[0].column_letter  # Get the column letter
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(str(cell.value))
+            except:
+                pass
+        adjusted_width = (max_length + 2)
+        ws.column_dimensions[column].width = adjusted_width
+
+    # Save the formatted Excel file
+    wb.save(file_name)
+    
+    print(f"Saved and formatted file: {file_name}")
+
+# Apply transformations and additional logic for the master file
+master_df = filtered_df_master
+
+# Save the master file
+master_file_name = 'master_membership_file.xlsx'
+master_df.to_excel(master_file_name, index=False)
+
+# Adjust column widths for master file
+wb = openpyxl.load_workbook(master_file_name)
+ws = wb.active
+
+for col in ws.columns:
+    max_length = 0
+    column = col[0].column_letter  # Get the column letter
+    for cell in col:
+        try:
+            if len(str(cell.value)) > max_length:
+                max_length = len(str(cell.value))
+        except:
+            pass
+    adjusted_width = (max_length + 2)
+    ws.column_dimensions[column].width = adjusted_width
+
+# Save the formatted master Excel file
+wb.save(master_file_name)
+print(f"Master file saved: {master_file_name}")
